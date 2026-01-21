@@ -39,9 +39,9 @@ public sealed class XenoHiveSystem : SharedXenoHiveSystem
     private readonly List<string> _announce = [];
     private readonly EntProtoId _defaultHive = "CMXenoHive";
 
-    private TimeSpan _lateJoinsPerBurrowedLarvaEarlyThreshold;
-    private float _lateJoinsPerBurrowedLarvaEarly;
-    private float _lateJoinsPerBurrowedLarva;
+    private TimeSpan _lateJoinsPerBurrowedLarvaAdjustmentThreshold;
+    private float _lateJoinsPerBurrowedLarvaAdjustment;
+    private float _marinesPerXeno;
 
     public override void Initialize()
     {
@@ -52,11 +52,11 @@ public sealed class XenoHiveSystem : SharedXenoHiveSystem
         SubscribeLocalEvent<HijackBurrowedSurgeComponent, ComponentShutdown>(OnBurrowedSurgeShutdown);
 
         Subs.CVar(_config,
-            RMCCVars.RMCLateJoinsPerBurrowedLarvaEarlyThresholdMinutes,
-            v => _lateJoinsPerBurrowedLarvaEarlyThreshold = TimeSpan.FromMinutes(v),
+            RMCCVars.RMCLateJoinsPerBurrowedLarvaAdjustmentThresholdMinutes,
+            v => _lateJoinsPerBurrowedLarvaAdjustmentThreshold = TimeSpan.FromMinutes(v),
             true);
-        Subs.CVar(_config, RMCCVars.RMCLateJoinsPerBurrowedLarvaEarly, v => _lateJoinsPerBurrowedLarvaEarly = v, true);
-        Subs.CVar(_config, RMCCVars.RMCLateJoinsPerBurrowedLarva, v => _lateJoinsPerBurrowedLarva = v, true);
+        Subs.CVar(_config, RMCCVars.RMCLateJoinsPerBurrowedLarvaAdjustment, v => _lateJoinsPerBurrowedLarvaAdjustment = v, true);
+        Subs.CVar(_config, RMCCVars.CMMarinesPerXeno, v => _marinesPerXeno = v, true);
     }
 
     private void OnPlayerSpawnComplete(PlayerSpawnCompleteEvent ev)
@@ -69,15 +69,18 @@ public sealed class XenoHiveSystem : SharedXenoHiveSystem
 
         if (ev.JobId is not { } jobId ||
             !_prototypes.TryIndex(jobId, out JobPrototype? job) ||
-            job.RoleWeight < 0)
+            job.RoleWeight <= 0)
         {
             return;
         }
 
         var time = _timing.CurTime;
-        var lateJoinsPer = time < _lateJoinsPerBurrowedLarvaEarlyThreshold
-            ? _lateJoinsPerBurrowedLarvaEarly
-            : _lateJoinsPerBurrowedLarva;
+        var lateJoinsPer = _marinesPerXeno;
+        if (time >= _lateJoinsPerBurrowedLarvaAdjustmentThreshold)
+        {
+            lateJoinsPer += _lateJoinsPerBurrowedLarvaAdjustment;
+        }
+        lateJoinsPer = Math.Max(lateJoinsPer, 1f);
 
         var hives = EntityQueryEnumerator<HiveComponent>();
         while (hives.MoveNext(out var uid, out var hive))
