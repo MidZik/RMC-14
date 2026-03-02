@@ -191,6 +191,13 @@ public sealed class SensorTowerSystem : EntitySystem
             _ => throw new ArgumentOutOfRangeException(),
         };
 
+        if (ent.Comp.State == SensorTowerState.Off)
+        {
+            // After being repaired, the sensor tower is guaranteed to be functional for a short period
+            // to prevent the rare circumstance of the tower immediately breaking multiple times in a row.
+            ent.Comp.NextBreakAt = _timing.CurTime + _random.Next(ent.Comp.GuaranteedUptime, ent.Comp.BreakEvery);
+        }
+
         Dirty(ent);
         UpdateAppearance(ent);
     }

@@ -47,6 +47,9 @@ public sealed partial class SensorTowerComponent : Component
     [DataField, AutoNetworkedField]
     public TimeSpan BreakEvery = TimeSpan.FromSeconds(175);
 
+    [DataField, AutoNetworkedField]
+    public TimeSpan GuaranteedUptime = TimeSpan.FromSeconds(10);
+
     [DataField(customTypeSerializer: typeof(TimeOffsetSerializer)), AutoNetworkedField, AutoPausedField]
     public TimeSpan NextBreakAt;
 
