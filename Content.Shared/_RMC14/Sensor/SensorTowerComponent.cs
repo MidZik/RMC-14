@@ -45,10 +45,7 @@ public sealed partial class SensorTowerComponent : Component
     public float BreakChance = 0.15f;
 
     [DataField, AutoNetworkedField]
-    public TimeSpan BreakEvery = TimeSpan.FromSeconds(175);
-
-    [DataField, AutoNetworkedField]
-    public TimeSpan GuaranteedUptime = TimeSpan.FromSeconds(10);
+    public TimeSpan BreakEvery = TimeSpan.FromSeconds(50);
 
     [DataField(customTypeSerializer: typeof(TimeOffsetSerializer)), AutoNetworkedField, AutoPausedField]
     public TimeSpan NextBreakAt;
