@@ -1,5 +1,6 @@
 using System.Linq;
 using System.Numerics;
+using Content.Shared._RMC.Movement;
 using Content.Shared._RMC14.Barricade;
 using Content.Shared._RMC14.Barricade.Components;
 using Content.Shared._RMC14.CameraShake;
@@ -9,15 +10,10 @@ using Content.Shared._RMC14.Movement;
 using Content.Shared._RMC14.Pulling;
 using Content.Shared._RMC14.Stun;
 using Content.Shared._RMC14.Weapons.Melee;
-using Content.Shared._RMC14.Xenonids.Construction;
-using Content.Shared._RMC14.Xenonids.Egg;
-using Content.Shared._RMC14.Xenonids.Fruit.Components;
 using Content.Shared._RMC14.Xenonids.Hive;
 using Content.Shared._RMC14.Xenonids.Invisibility;
 using Content.Shared._RMC14.Xenonids.Parasite;
 using Content.Shared._RMC14.Xenonids.Plasma;
-using Content.Shared._RMC14.Xenonids.Spray;
-using Content.Shared._RMC14.Xenonids.Weeds;
 using Content.Shared.ActionBlocker;
 using Content.Shared.Coordinates;
 using Content.Shared.Damage;
@@ -64,7 +60,7 @@ public sealed class XenoLeapSystem : EntitySystem
     [Dependency] private readonly INetManager _net = default!;
     [Dependency] private readonly SharedPhysicsSystem _physics = default!;
     [Dependency] private readonly SharedPopupSystem _popup = default!;
-    [Dependency] private readonly SharedRMCLagCompensationSystem _rmcLagCompensation = default!;
+    [Dependency] private readonly SharedRMCLagCompensationSystem _rmcLag = default!;
     [Dependency] private readonly RMCPullingSystem _rmcPulling = default!;
     [Dependency] private readonly StandingStateSystem _standing = default!;
     [Dependency] private readonly SharedStunSystem _stun = default!;
@@ -82,13 +78,19 @@ public sealed class XenoLeapSystem : EntitySystem
 
     private EntityQuery<PhysicsComponent> _physicsQuery;
     private EntityQuery<FixturesComponent> _fixturesQuery;
+    private EntityQuery<RMCLagCompensationComponent> _lagCompQuery;
 
-    private bool _logPrediction = false;
+    private bool _logPrediction = true;
+
+    private PredictedEventStorage<XenoLeapPredictedHitEvent> _predictedEventStorage = new();
 
     public override void Initialize()
     {
         _physicsQuery = GetEntityQuery<PhysicsComponent>();
         _fixturesQuery = GetEntityQuery<FixturesComponent>();
+        _lagCompQuery = GetEntityQuery<RMCLagCompensationComponent>();
+
+        SubscribeLocalEvent<PhysicsUpdateBeforeSolveEvent>(OnBeforeSolve);
 
         SubscribeAllEvent<XenoLeapPredictedHitEvent>(OnPredictedHit);
 
@@ -104,11 +106,19 @@ public sealed class XenoLeapSystem : EntitySystem
         SubscribeLocalEvent<RMCLeapProtectionComponent, MapInitEvent>(OnMapInit);
         SubscribeLocalEvent<RMCLeapProtectionComponent, XenoLeapHitAttempt>(OnXenoLeapHitAttempt);
 
-        SubscribeLocalEvent<XenoLeapingComponent, StartCollideEvent>(OnXenoLeapingDoHit);
+        SubscribeLocalEvent<XenoLeapingComponent, PreventCollideEvent>(OnXenoLeapingPreventCollide);
+        SubscribeLocalEvent<XenoLeapingComponent, StartCollideEvent>(OnXenoLeapingStartCollide);
         SubscribeLocalEvent<XenoLeapingComponent, ComponentRemove>(OnXenoLeapingRemove);
         SubscribeLocalEvent<XenoLeapingComponent, PhysicsSleepEvent>(OnXenoLeapingPhysicsSleep);
         SubscribeLocalEvent<XenoLeapingComponent, StartPullAttemptEvent>(OnXenoLeapingStartPullAttempt);
         SubscribeLocalEvent<XenoLeapingComponent, PullAttemptEvent>(OnXenoLeapingPullAttempt);
+
+        UpdatesBefore.Add(typeof(SharedPhysicsSystem));
+    }
+
+    private void OnBeforeSolve(ref PhysicsUpdateBeforeSolveEvent ev)
+    {
+        _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit);
     }
 
     private void OnPredictedHit(XenoLeapPredictedHitEvent msg, EntitySessionEventArgs args)
@@ -116,7 +126,21 @@ public sealed class XenoLeapSystem : EntitySystem
         if (args.SenderSession.AttachedEntity is not { } ent)
             return;
 
-        if (!TryComp(ent, out XenoLeapingComponent? leaping))
+        _predictedEventStorage.Add(ent, msg.Time, msg, args);
+    }
+
+    private void HandlePredictedHit(XenoLeapPredictedHitEvent msg, EntitySessionEventArgs args)
+    {
+        var offset = msg.Time - _rmcLag.PhysicsCurTime;
+
+        if (offset < -_timing.TickPeriod)
+            return; // don't handle events that arrived over a tick too late
+
+        if (args.SenderSession.AttachedEntity is not { } ent)
+            return;
+
+        if (!TryComp<XenoLeapingComponent>(ent, out var leaping)
+            || !leaping.Running)
             return;
 
         if (GetEntity(msg.Target) is not { Valid: true } target)
@@ -124,15 +148,13 @@ public sealed class XenoLeapSystem : EntitySystem
 
         if (_net.IsServer)
         {
-            if (!HasComp<XenoLeapComponent>(ent) || !leaping.Running)
-                return;
+            _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
 
-            _rmcLagCompensation.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
-            if (!_rmcLagCompensation.Collides(target, ent, args.SenderSession, msg.Substep))
+            if (!_rmcLag.Collides(target, ent, args.SenderSession, offset))
                 return;
         }
 
-        ApplyLeapingHitEffects((ent, leaping), target);
+        TryLeapingHit((ent, leaping), target);
     }
 
     private void OnXenoLeapAction(Entity<XenoLeapComponent> xeno, ref XenoLeapActionEvent args)
@@ -182,6 +204,9 @@ public sealed class XenoLeapSystem : EntitySystem
         if (EnsureComp<XenoLeapingComponent>(xeno, out var leaping))
             return;
 
+        TryComp<ActorComponent>(xeno, out var actor);
+        var session = actor?.PlayerSession;
+
         args.Handled = true;
 
         leaping.KnockdownRequiresInvisibility = xeno.Comp.KnockdownRequiresInvisibility;
@@ -193,6 +218,9 @@ public sealed class XenoLeapSystem : EntitySystem
         leaping.TargetCameraShakeStrength = xeno.Comp.TargetCameraShakeStrength;
         leaping.IgnoredCollisionGroupLarge = xeno.Comp.IgnoredCollisionGroupLarge;
         leaping.IgnoredCollisionGroupSmall = xeno.Comp.IgnoredCollisionGroupSmall;
+        leaping.ClientTickDelay = _timing.CurTick.Value - _rmcLag.GetLastRealTick(session?.UserId).Value;
+
+        _rmcLag.SendLastRealTick();
 
         if (xeno.Comp.PlasmaCost > FixedPoint2.Zero &&
             !_xenoPlasma.TryRemovePlasmaPopup(xeno.Owner, xeno.Comp.PlasmaCost))
@@ -244,7 +272,7 @@ public sealed class XenoLeapSystem : EntitySystem
             if (_hive.FromSameHive(xeno.Owner, ent))
                 continue;
 
-            if (ApplyLeapingHitEffects((xeno, leaping), ent))
+            if (TryLeapingHit((xeno, leaping), ent))
                 return;
         }
     }
@@ -287,9 +315,73 @@ public sealed class XenoLeapSystem : EntitySystem
         args.Range = ent.Comp.LastHitRange;
     }
 
-    private void OnXenoLeapingDoHit(Entity<XenoLeapingComponent> xeno, ref StartCollideEvent args)
+    private void OnXenoLeapingPreventCollide(Entity<XenoLeapingComponent> xeno, ref PreventCollideEvent args)
     {
-        ApplyLeapingHitEffects(xeno, args.OtherEntity);
+        if (args.Cancelled)
+            return;
+
+        if (!_lagCompQuery.HasComp(args.OtherEntity))
+            return; // Only check and prevent collisions with lag comp'd entities
+
+        if (!_timing.IsFirstTimePredicted)
+        {
+            // Predict lag comp.
+            args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
+                xeno.Owner,
+                _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
+            return;
+        }
+
+        if (_net.IsServer)
+        {
+            // Prevent a collision if the client wouldn't have collided on their end.
+            if (TryComp<ActorComponent>(xeno, out var actor)
+                && actor.PlayerSession is { } session)
+            {
+                args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
+                    xeno.Owner,
+                    _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
+            }
+        }
+    }
+
+    private void OnXenoLeapingStartCollide(Entity<XenoLeapingComponent> xeno, ref StartCollideEvent args)
+    {
+        if (!IsValidLeapHit(xeno, args.OtherEntity))
+            return;
+
+        var predictedEv = new XenoLeapPredictedHitEvent(
+            GetNetEntity(args.OtherEntity),
+            _rmcLag.GetLastRealTick(null),
+            _rmcLag.PhysicsCurTime);
+
+        if (_net.IsClient && _timing.IsFirstTimePredicted)
+        {
+            if (_logPrediction)
+            {
+                TryComp(xeno, out TransformComponent? leaperTransform);
+                TryComp(args.OtherEntity, out TransformComponent? targetTransform);
+                Log.Debug($"""
+                    SENDING PREDICTED LEAP HIT!!
+                      CurTime:        {_rmcLag.PhysicsCurTime.TotalSeconds:F3}
+                      LastRealTick:   {_rmcLag.GetLastRealTick(null)}
+                      Phys Substep:   {_rmcLag.GetPhysicsSubstep()}
+                      In simulation?  {_timing.InSimulation}
+                      ApplyingState?  {_timing.ApplyingState}
+                      FirstTimePred?  {_timing.IsFirstTimePredicted}
+                      Leaper Coords:  {leaperTransform?.Coordinates}
+                      Target Coords:  {targetTransform?.Coordinates}
+                    """);
+            }
+
+            _rmcLag.SendLastRealTick();
+            RaisePredictiveEvent(predictedEv);
+        }
+        else
+        {
+            RaiseLocalEvent(predictedEv);
+        }
+        _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
     }
 
     private void OnXenoLeapingRemove(Entity<XenoLeapingComponent> ent, ref ComponentRemove args)
@@ -522,7 +614,7 @@ public sealed class XenoLeapSystem : EntitySystem
         return true;
     }
 
-    private bool ApplyLeapingHitEffects(Entity<XenoLeapingComponent> xeno, EntityUid target)
+    private bool TryLeapingHit(Entity<XenoLeapingComponent> xeno, EntityUid target)
     {
         if (!IsValidLeapHit(xeno, target))
             return false;
@@ -600,38 +692,6 @@ public sealed class XenoLeapSystem : EntitySystem
         {
             xeno.Comp.PlayedSound = true;
             _audio.PlayPvs(xeno.Comp.LeapSound, xeno);
-        }
-
-        if (_net.IsClient)
-        {
-            if (_logPrediction)
-            {
-                // Leap code causes this to spam the console a bit
-                TryComp(xeno, out TransformComponent? leaperTransform);
-                TryComp(target, out TransformComponent? targetTransform);
-                Log.Debug($"""
-                    SENDING PREDICTED LEAP HIT!!
-                      CurTick:        {_timing.CurTick}
-                      LastRealTick:   {_rmcLagCompensation.GetLastRealTick(null)}
-                      Phys Substep:   {_rmcLagCompensation.GetCurrentSubstep()}
-                      In simulation?  {_timing.InSimulation}
-                      ApplyingState?  {_timing.ApplyingState}
-                      FirstTimePred?  {_timing.IsFirstTimePredicted}
-                      Substep:        {_rmcLagCompensation.GetClientSubstep()}
-                      Leaper Coords:  {leaperTransform?.Coordinates}
-                      Target Coords:  {targetTransform?.Coordinates}
-                    """);
-            }
-
-            var predictedEv = new XenoLeapPredictedHitEvent(
-                GetNetEntity(target),
-                _rmcLagCompensation.GetLastRealTick(null),
-                _rmcLagCompensation.GetClientSubstep());
-            RaiseNetworkEvent(predictedEv);
-            if (_timing.InPrediction && _timing.IsFirstTimePredicted)
-            {
-                RaisePredictiveEvent(predictedEv);
-            }
         }
 
         StopLeap(xeno);

@@ -56,4 +56,6 @@ public sealed partial class XenoLeapingComponent : Component
 
     [DataField, AutoNetworkedField]
     public CollisionGroup IgnoredCollisionGroupSmall;
+
+    public uint ClientTickDelay;
 }

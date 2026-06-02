@@ -18,6 +18,7 @@ using System.Linq;
 using System.Numerics;
 using Content.Shared.Coordinates;
 using Robust.Shared.Random;
+using Content.Server._RMC14.Movement;
 
 namespace Content.Server.Weapons.Melee;
 
@@ -25,7 +26,7 @@ public sealed class MeleeWeaponSystem : SharedMeleeWeaponSystem
 {
     [Dependency] private readonly ChatSystem _chat = default!;
     [Dependency] private readonly DamageExamineSystem _damageExamine = default!;
-    [Dependency] private readonly LagCompensationSystem _lag = default!;
+    [Dependency] private readonly RMCLagCompensationSystem _lag = default!; // RMC14, changed from LagCompensationSystem
     [Dependency] private readonly SharedColorFlashEffectSystem _color = default!;
 
     public override void Initialize()

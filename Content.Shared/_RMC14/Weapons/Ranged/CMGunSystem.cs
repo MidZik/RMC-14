@@ -491,7 +491,7 @@ public sealed class CMGunSystem : EntitySystem
         {
             if (!TryComp(projectile, out ProjectileComponent? projectileComp) ||
                 !TryComp(projectile, out PhysicsComponent? physicsComp) ||
-                !_rmcLagCompensation.IsWithinMargin(projectile, gunComp.Target.Value, session, gun.Comp.Range))
+                !_rmcLagCompensation.IsWithinMargin(gunComp.Target.Value, projectile, session, gun.Comp.Range))
             {
                 continue;
             }

@@ -27,7 +27,7 @@
   - type: InputMover
   - type: Input
     context: "human"
-  - type: LagCompensation
+  - type: RMCLagCompensation # RMC replaced LagCompensation
   - type: MobMover
   - type: Actions
   - type: Alerts

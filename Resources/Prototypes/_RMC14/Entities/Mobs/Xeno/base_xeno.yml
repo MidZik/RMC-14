@@ -96,7 +96,7 @@
   - type: Clickable
   - type: InteractionOutline
   - type: InputMover
-  - type: LagCompensation
+  - type: RMCLagCompensation # RMC replaced LagCompensation
   - type: MobMover
   - type: Emoting
   - type: Actions

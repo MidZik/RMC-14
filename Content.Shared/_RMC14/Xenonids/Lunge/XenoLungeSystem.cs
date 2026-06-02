@@ -1,5 +1,5 @@
-using System.Linq;
 using System.Numerics;
+using Content.Shared._RMC.Movement;
 using Content.Shared._RMC14.Damage.ObstacleSlamming;
 using Content.Shared._RMC14.Movement;
 using Content.Shared._RMC14.Pulling;
@@ -16,6 +16,7 @@ using Content.Shared.Weapons.Melee;
 using Content.Shared.Weapons.Melee.Events;
 using Robust.Shared.Network;
 using Robust.Shared.Physics.Components;
+using Robust.Shared.Physics.Events;
 using Robust.Shared.Physics.Systems;
 using Robust.Shared.Player;
 using Robust.Shared.Timing;
@@ -36,54 +37,85 @@ public sealed class XenoLungeSystem : EntitySystem
     [Dependency] private readonly SharedStunSystem _stun = default!;
     [Dependency] private readonly XenoSystem _xeno = default!;
     [Dependency] private readonly RMCPullingSystem _rmcPulling = default!;
-    [Dependency] private readonly SharedRMCLagCompensationSystem _rmcLagCompensation = default!;
+    [Dependency] private readonly SharedRMCLagCompensationSystem _rmcLag = default!;
     [Dependency] private readonly RMCObstacleSlammingSystem _rmcObstacleSlamming = default!;
     [Dependency] private readonly XenoLeapSystem _leap = default!;
     [Dependency] private readonly RMCSizeStunSystem _size = default!;
 
     private EntityQuery<PhysicsComponent> _physicsQuery;
     private EntityQuery<ThrownItemComponent> _thrownItemQuery;
+    private EntityQuery<RMCLagCompensationComponent> _lagCompQuery;
+
+    private bool _logPrediction = true;
+
+    private PredictedEventStorage<XenoLungePredictedHitEvent> _predictedEventStorage = new();
 
     public override void Initialize()
     {
         _physicsQuery = GetEntityQuery<PhysicsComponent>();
         _thrownItemQuery = GetEntityQuery<ThrownItemComponent>();
+        _lagCompQuery = GetEntityQuery<RMCLagCompensationComponent>();
+
+        SubscribeLocalEvent<PhysicsUpdateBeforeSolveEvent>(OnBeforeSolve);
 
         SubscribeAllEvent<XenoLungePredictedHitEvent>(OnPredictedHit);
 
         SubscribeLocalEvent<XenoLungeComponent, XenoLungeActionEvent>(OnXenoLungeAction);
         SubscribeLocalEvent<XenoLungeComponent, MeleeAttackAttemptEvent>(OnAttackAttempt);
 
-        SubscribeLocalEvent<XenoActiveLungeComponent, ThrowDoHitEvent>(OnXenoLungeHit);
+        SubscribeLocalEvent<XenoActiveLungeComponent, PreventCollideEvent>(OnXenoLungingPreventCollide);
+        SubscribeLocalEvent<XenoActiveLungeComponent, ThrowDoHitEvent>(OnXenoLungingHit);
         SubscribeLocalEvent<XenoActiveLungeComponent, LandEvent>(OnXenoLungeLand);
 
         SubscribeLocalEvent<RMCLungeProtectionComponent, XenoLungeHitAttempt>(OnXenoLungeHitAttempt);
 
         SubscribeLocalEvent<XenoLungeStunnedComponent, PullStoppedMessage>(OnXenoLungeStunnedPullStopped);
+
+        UpdatesBefore.Add(typeof(SharedPhysicsSystem));
+    }
+
+    private void OnBeforeSolve(ref PhysicsUpdateBeforeSolveEvent ev)
+    {
+        _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit);
     }
 
     private void OnPredictedHit(XenoLungePredictedHitEvent msg, EntitySessionEventArgs args)
     {
-        if (_net.IsClient)
+        if (args.SenderSession.AttachedEntity is not { } ent)
             return;
+
+        _predictedEventStorage.Add(ent, msg.Time, msg, args);
+    }
+
+    private void HandlePredictedHit(XenoLungePredictedHitEvent msg, EntitySessionEventArgs args)
+    {
+        var offset = msg.Time - _rmcLag.PhysicsCurTime;
+
+        if (offset < -_timing.TickPeriod)
+            return; // don't handle events that arrived over a tick too late
 
         if (args.SenderSession.AttachedEntity is not { } ent)
             return;
 
-        if (!TryComp(ent, out XenoActiveLungeComponent? lunging))
+        if (!TryComp<XenoActiveLungeComponent>(ent, out var lunging)
+            || !lunging.Running)
             return;
 
         if (GetEntity(msg.Target) is not { Valid: true } target)
             return;
 
-        if (!lunging.Running)
-            return;
-
         if (lunging.Target != target)
             return;
 
-        _rmcLagCompensation.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
-        ApplyLungeHitEffects((ent, lunging), target, true, false);
+        if (_net.IsServer)
+        {
+            _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
+
+            if (!_rmcLag.Collides(target, ent, args.SenderSession, offset))
+                return;
+        }
+
+        TryLungeHit((ent, lunging), target, true, false);
     }
 
     private void OnXenoLungeAction(Entity<XenoLungeComponent> xeno, ref XenoLungeActionEvent args)
@@ -108,9 +140,14 @@ public sealed class XenoLungeSystem : EntitySystem
         _rmcPulling.TryStopAllPullsFromAndOn(xeno);
 
         var origin = _transform.GetMapCoordinates(xeno);
-        var targetCoords = _rmcLagCompensation.GetCoordinates(target, xeno);
+        var targetCoords = _net.IsClient ?
+            _rmcLag.GetCoordinates(target, _timing.CurTime)
+            : _rmcLag.GetCoordinates(target, xeno);
         var diff = targetCoords.Position - origin.Position;
         diff = diff.Normalized() * xeno.Comp.Range;
+
+        TryComp<ActorComponent>(xeno, out var actor);
+        var session = actor?.PlayerSession;
 
         var active = EnsureComp<XenoActiveLungeComponent>(xeno);
         active.Origin = origin;
@@ -119,6 +156,7 @@ public sealed class XenoLungeSystem : EntitySystem
         active.TargetCoordinates = _transform.ToMapCoordinates(targetCoords);
         active.Range = xeno.Comp.Range;
         active.StunTime = xeno.Comp.StunTime;
+        active.ClientTickDelay = _timing.CurTick.Value - _rmcLag.GetLastRealTick(session?.UserId).Value;
         Dirty(xeno);
 
         _rmcObstacleSlamming.MakeImmune(xeno, 0.5f);
@@ -133,7 +171,7 @@ public sealed class XenoLungeSystem : EntitySystem
             if (ent != target)
                 continue;
 
-            if (ApplyLungeHitEffects(xeno.Owner, ent, true))
+            if (TryLungeHit((xeno.Owner, active), ent, true))
                 return;
         }
     }
@@ -155,102 +193,179 @@ public sealed class XenoLungeSystem : EntitySystem
         }
     }
 
-    private void OnXenoLungeHit(Entity<XenoActiveLungeComponent> xeno, ref ThrowDoHitEvent args)
+    private void OnXenoLungingPreventCollide(Entity<XenoActiveLungeComponent> xeno, ref PreventCollideEvent args)
     {
-        if (!_mobState.IsAlive(xeno) || HasComp<StunnedComponent>(xeno))
-        {
-            RemCompDeferred<XenoActiveLungeComponent>(xeno);
+        if (args.Cancelled)
             return;
-        }
 
-        ApplyLungeHitEffects(xeno.AsNullable(), args.Target, true);
-    }
+        if (!_lagCompQuery.HasComp(args.OtherEntity))
+            return; // Only check and prevent collisions with lag comp'd entities
 
-    private void OnXenoLungeLand(Entity<XenoActiveLungeComponent> ent, ref LandEvent args)
-    {
-        if (!_pulling.IsPulling(ent))
-            ApplyLungeHitEffects(ent.AsNullable(), ent.Comp.Target, false);
-
-        RemCompDeferred<XenoActiveLungeComponent>(ent);
-    }
-
-    private bool ApplyLungeHitEffects(Entity<XenoActiveLungeComponent?> xeno, EntityUid targetId, bool stopThrow, bool predicted = true)
-    {
-        if (!Resolve(xeno, ref xeno.Comp, false))
-            return false;
-
-        if (_mobState.IsDead(targetId))
-            return false;
-
-        if (_physicsQuery.TryGetComponent(xeno, out var physics) &&
-            _thrownItemQuery.TryGetComponent(xeno, out var thrown))
+        if (!_timing.IsFirstTimePredicted)
         {
-            _thrownItem.LandComponent(xeno, thrown, physics, true);
-
-            if (stopThrow)
-                _thrownItem.StopThrow(xeno, thrown);
-        }
-
-        var ev = new XenoLungeHitAttempt(xeno);
-        RaiseLocalEvent(targetId, ref ev);
-
-        if (ev.Cancelled)
-            return true;
-
-        if (!_xeno.CanAbilityAttackTarget(xeno, targetId) ||
-            (_size.TryGetSize(targetId, out var size) && size >= RMCSizes.Big) ||
-            (TryComp<XenoComponent>(targetId, out var xenoComp) && xenoComp.Tier >= 2)) //Fails if big or tier 2 or more
-        {
-            return true;
+            // Predict lag comp.
+            args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
+                xeno.Owner,
+                _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
+            return;
         }
 
         if (_net.IsServer)
         {
-            var stunTime = _xeno.TryApplyXenoDebuffMultiplier(targetId, xeno.Comp.StunTime);
-            _stun.TryParalyze(targetId, stunTime, true);
+            // Prevent a collision if the client wouldn't have collided on their end.
+            if (TryComp<ActorComponent>(xeno, out var actor)
+                && actor.PlayerSession is { } session)
+            {
+                args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
+                    xeno.Owner,
+                    _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
+            }
+        }
+    }
 
-            var stunned = EnsureComp<XenoLungeStunnedComponent>(targetId);
-            stunned.ExpireAt = _timing.CurTime + stunTime;
+    private void OnXenoLungingHit(Entity<XenoActiveLungeComponent> xeno, ref ThrowDoHitEvent args)
+    {
+        if (!_mobState.IsAlive(xeno)
+            || HasComp<StunnedComponent>(xeno))
+        {
+            StopLunge(xeno);
+            return;
+        }
+
+        if (_mobState.IsDead(args.Target))
+            return;
+
+        Log.Debug($"Lunge ThrowDoHitEvent on {_rmcLag.PhysicsCurTime.TotalSeconds:F3}");
+
+        var predictedEv = new XenoLungePredictedHitEvent(
+            GetNetEntity(args.Target),
+            _rmcLag.GetLastRealTick(null),
+            _rmcLag.PhysicsCurTime);
+
+        if (_net.IsClient && _timing.IsFirstTimePredicted)
+        {
+            if (_logPrediction)
+            {
+                TryComp(xeno, out TransformComponent? leaperTransform);
+                TryComp(args.Target, out TransformComponent? targetTransform);
+                Log.Debug($"""
+                    SENDING PREDICTED LUNGE HIT!!
+                      CurTime:        {_rmcLag.PhysicsCurTime.TotalSeconds:F3}
+                      LastRealTick:   {_rmcLag.GetLastRealTick(null)}
+                      Phys Substep:   {_rmcLag.GetPhysicsSubstep()}
+                      In simulation?  {_timing.InSimulation}
+                      ApplyingState?  {_timing.ApplyingState}
+                      FirstTimePred?  {_timing.IsFirstTimePredicted}
+                      Leaper Coords:  {leaperTransform?.Coordinates}
+                      Target Coords:  {targetTransform?.Coordinates}
+                    """);
+            }
+
+            _rmcLag.SendLastRealTick();
+            RaisePredictiveEvent(predictedEv);
+        }
+        else
+        {
+            RaiseLocalEvent(predictedEv);
+        }
+        _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
+    }
+
+    private void OnXenoLungeLand(Entity<XenoActiveLungeComponent> ent, ref LandEvent args)
+    {
+        // RMC14 TODO why was this here in the first place? investigate
+        //if (!_pulling.IsPulling(ent))
+        //    TryLungeHit(ent, ent.Comp.Target, false);
+
+        //StopLunge(ent);
+    }
+
+    private bool TryLungeHit(Entity<XenoActiveLungeComponent> xeno, EntityUid target, bool stopThrow, bool predicted = true)
+    {
+        if (!_mobState.IsAlive(xeno)
+            || HasComp<StunnedComponent>(xeno)
+            || _mobState.IsDead(target))
+            return false;
+
+        if (_logPrediction)
+        {
+            Log.Debug($"""
+                APPLYING LUNGE HIT!!
+                  CurTime:        {_rmcLag.PhysicsCurTime.TotalSeconds:F3}
+                  Phys Substep:   {_rmcLag.GetPhysicsSubstep()}
+                  In simulation?  {_timing.InSimulation}
+                  ApplyingState?  {_timing.ApplyingState}
+                  FirstTimePred?  {_timing.IsFirstTimePredicted}
+                  Leaper Coords:  {Transform(xeno).Coordinates}
+                  Target Coords:  {Transform(target).Coordinates}
+                """);
+        }
+
+        //if (_physicsQuery.TryGetComponent(xeno, out var physics) &&
+        //    _thrownItemQuery.TryGetComponent(xeno, out var thrown))
+        //{
+        //    _thrownItem.LandComponent(xeno, thrown, physics, true);
+
+        //    if (stopThrow)
+        //        _thrownItem.StopThrow(xeno, thrown);
+        //}
+
+        var ev = new XenoLungeHitAttempt(xeno);
+        RaiseLocalEvent(target, ref ev);
+
+        if (ev.Cancelled)
+        {
+            StopLunge(xeno);
+            return true;
+        }
+
+        if (!_xeno.CanAbilityAttackTarget(xeno, target) ||
+            (_size.TryGetSize(target, out var size) && size >= RMCSizes.Big) ||
+            (TryComp<XenoComponent>(target, out var xenoComp) && xenoComp.Tier >= 2)) //Fails if big or tier 2 or more
+        {
+            StopLunge(xeno);
+            return true;
+        }
+
+        var curTime = _timing.CurTime;
+
+        if (_net.IsServer)
+        {
+            var stunTime = _xeno.TryApplyXenoDebuffMultiplier(target, xeno.Comp.StunTime);
+            _stun.TryParalyze(target, stunTime, true);
+
+            var stunned = EnsureComp<XenoLungeStunnedComponent>(target);
+            stunned.ExpireAt = curTime + stunTime;
             stunned.Stunner = GetNetEntity(xeno);
-            Dirty(targetId, stunned);
+            Dirty(target, stunned);
         }
 
         if (TryComp(xeno, out MeleeWeaponComponent? melee))
         {
-            melee.NextAttack = _timing.CurTime;
+            melee.NextAttack = curTime;
             Dirty(xeno, melee);
         }
 
-        if (_net.IsClient && predicted)
-        {
-            var predictedEv = new XenoLungePredictedHitEvent(GetNetEntity(targetId), _rmcLagCompensation.GetLastRealTick(null));
-            RaiseNetworkEvent(predictedEv);
-            if (_timing.InPrediction && _timing.IsFirstTimePredicted)
-            {
-                RaisePredictiveEvent(predictedEv);
-            }
-        }
+        var targetCoords = xeno.Comp.TargetCoordinates;
 
         StopLunge(xeno);
 
-        _transform.SetMapCoordinates(targetId, xeno.Comp.TargetCoordinates);
+        _transform.SetMapCoordinates(target, targetCoords);
 
         // Fixes lunges done when hugging a wall that would otherwise not move you
         var coordinates = _transform.GetMapCoordinates(xeno);
-        if (xeno.Comp.TargetCoordinates.MapId == coordinates.MapId &&
-            !xeno.Comp.TargetCoordinates.InRange(coordinates, 1.25f))
+        if (targetCoords.MapId == coordinates.MapId &&
+            !targetCoords.InRange(coordinates, 1.25f))
         {
-            var distance = xeno.Comp.TargetCoordinates.Position - coordinates.Position;
+            var distance = targetCoords.Position - coordinates.Position;
             var length = distance.Length();
-            var newPosition = coordinates.Offset(((float) (length - 1.25) / length) * distance);
+            var newPosition = coordinates.Offset(((float)(length - 1.25) / length) * distance);
             _transform.SetMapCoordinates(xeno, newPosition);
         }
 
-        _pulling.TryStartPull(xeno, targetId);
-        RemCompDeferred<XenoActiveLungeComponent>(xeno);
-        return true;
+        _pulling.TryStartPull(xeno, target);
 
-        var player = IoCManager.Resolve<ISharedPlayerManager>().Sessions.Select(e => e.Ping).Order();
+        return true;
     }
 
     private void OnXenoLungeStunnedPullStopped(Entity<XenoLungeStunnedComponent> ent, ref PullStoppedMessage args)
@@ -279,11 +394,19 @@ public sealed class XenoLungeSystem : EntitySystem
 
     private void StopLunge(EntityUid lunging)
     {
+        RemCompDeferred<XenoActiveLungeComponent>(lunging);
+
         if (!_physicsQuery.TryGetComponent(lunging, out var physics))
             return;
 
         _physics.SetLinearVelocity(lunging, Vector2.Zero, body: physics);
         _physics.SetBodyStatus(lunging, physics, BodyStatus.OnGround);
+
+        if (_thrownItemQuery.TryGetComponent(lunging, out var thrown))
+        {
+            _thrownItem.LandComponent(lunging, thrown, physics, true);
+            _thrownItem.StopThrow(lunging, thrown);
+        }
     }
 
     public override void Update(float frameTime)
@@ -318,7 +441,7 @@ public sealed class XenoLungeSystem : EntitySystem
         //     if (!comp.Origin.InRange(coords, range))
         //     {
         //         if (!_pulling.IsPulling(uid))
-        //             ApplyLungeHitEffects((uid, comp), comp.Target, true);
+        //             TryLungeHit((uid, comp), comp.Target, true);
         //     }
         // }
     }
