@@ -84,50 +84,39 @@ public sealed class XenoProjectileSystem : EntitySystem
         _limitHitsId = 0;
     }
 
-    private void OnPredictedHit(XenoProjectilePredictedHitEvent msg, EntitySessionEventArgs args) => OnPredictedHit(msg, args, true);
-
-    private void OnPredictedHit(XenoProjectilePredictedHitEvent msg, EntitySessionEventArgs args, bool saveEarlyMessage)
+    private void OnPredictedHit(XenoProjectilePredictedHitEvent msg, EntitySessionEventArgs args)
     {
-        if (_net.IsClient || !_gunPrediction.GunPrediction)
+        if (args.SenderSession.AttachedEntity is not { } ent)
             return;
 
-        if (args.SenderSession.AttachedEntity is not { } ent)
+        _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
+
+        _predictedEventStorage.Add(ent, msg.Time, msg, args.SenderSession);
+    }
+
+    private void HandlePredictedHit(EntityUid xeno, XenoProjectilePredictedHitEvent msg, ICommonSession? perspectiveSession)
+    {
+        if (_net.IsClient || !_gunPrediction.GunPrediction)
             return;
 
         var msgTime = msg.Time;
         var projTime = msg.ProjTime;
         var curTime = _timing.CurTime;
 
-        if (msgTime < curTime)
+        if (msgTime < curTime && _logPrediction)
         {
-            if (_logPrediction)
-                Log.Warning($"Predicted hit message arrived late (Message for {msgTime.TotalSeconds:F3}, current time {curTime.TotalSeconds:F3}).");
-        }
-        else if (msgTime > curTime)
-        {
-            if (_logPrediction)
-                Log.Debug($"Predicted hit message arrived early (Message for {msgTime.TotalSeconds:F3}, current time {curTime.TotalSeconds:F3}). Saving it.");
-            _predictedEventStorage.Add(ent, msgTime, msg, args);
-            return;
+            Log.Warning($"Predicted hit message arrived late (Message for {msgTime.TotalSeconds:F3}, current time {curTime.TotalSeconds:F3}).");
         }
 
         if (GetEntity(msg.Target) is not { Valid: true } target)
             return;
 
-        if (!TryComp(ent, out XenoProjectileShooterComponent? shooter)
+        if (!TryComp(xeno, out XenoProjectileShooterComponent? shooter)
             || shooter.Shot.Count == 0
             || !shooter.Shot.TryFirstOrNull(e => CompOrNull<XenoProjectileShotComponent>(e)?.Id == msg.Id, out var shot))
         {
-            if (msgTime >= curTime && saveEarlyMessage)
-            {
-                if (_logPrediction)
-                    Log.Debug($"Predicted non-late shot ID {msg.Id} not found! Saving as early. (Time {curTime.TotalSeconds:F3})");
-                _predictedEventStorage.Add(ent, msgTime, msg, args);
-            }
-            else if (_logPrediction)
-            {
+            if (_logPrediction)
                 Log.Debug($"Predicted shot ID {msg.Id} not found! (Time {curTime.TotalSeconds:F3})");
-            }
             return;
         }
 
@@ -138,8 +127,7 @@ public sealed class XenoProjectileSystem : EntitySystem
             return;
         }
 
-        _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
-        var coordinates = _transform.ToMapCoordinates(_rmcLag.GetCoordinates(target, args.SenderSession));
+        var coordinates = _transform.ToMapCoordinates(_rmcLag.GetCoordinates(target, perspectiveSession));
 
         if (!TryComp(shot, out ProjectileComponent? projectile) ||
             !TryComp(shot, out PhysicsComponent? physics))
@@ -410,8 +398,7 @@ public sealed class XenoProjectileSystem : EntitySystem
         // Client may have already predicted hits for this projectile, check before we test collisions.
         if (_net.IsServer && predicted)
         {
-            // always process with saveEarlyMessages: false
-            _rmcLag.ProcessEvents(_predictedEventStorage, (ev, args) => OnPredictedHit(ev, args, false), xeno);
+            _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
         }
 
         return true;
@@ -432,8 +419,7 @@ public sealed class XenoProjectileSystem : EntitySystem
         }
         else // server
         {
-            // always process with saveEarlyMessages: false
-            _rmcLag.ProcessEvents(_predictedEventStorage, (ev, args) => OnPredictedHit(ev, args, false));
+            _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit);
         }
     }
 }

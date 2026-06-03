@@ -396,7 +396,7 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
     /// storage inside the handler.)
     /// </summary>
     public void ProcessEvents<T>(PredictedEventStorage<T> storage,
-        Action<T, EntitySessionEventArgs> handler,
+        Action<EntityUid, T, ICommonSession?> handler,
         EntityUid? source = null)
     {
         if (storage.Iterating)
@@ -419,7 +419,7 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
             if (item.PredictedTime <= physCurTime
                 && (source == null || source == item.Source))
             {
-                handler(item.Event, item.Args);
+                handler(item.Source, item.Event, item.Session);
                 continue;
             }
 
@@ -430,6 +430,40 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
         }
         // finally done iterating and moving items, remove excess items from the list
         storage.EarlyEvents.RemoveRange(writeIndex, eventsSpan.Length - writeIndex);
+        storage.Iterating = false;
+    }
+
+    /// <summary>
+    /// Passes every stored event that is predicted to occur now or in the past
+    /// into a handler for handling. Does NOT remove events from the list.
+    /// `handler` MUST NOT modify storage in any way. (Do not add events to the
+    /// storage inside the handler.)
+    /// </summary>
+    public void ProcessEventsWithoutRemoval<T>(PredictedEventStorage<T> storage,
+        Action<EntityUid, T, ICommonSession?> handler,
+        EntityUid? source = null)
+    {
+        if (storage.Iterating)
+        {
+            Log.Error("Tried processing event messages while they are already being processed.");
+            DebugTools.Assert(!storage.Iterating);
+            return;
+        }
+        storage.Iterating = true;
+
+        var physCurTime = PhysicsCurTime;
+        var eventsSpan = CollectionsMarshal.AsSpan(storage.EarlyEvents);
+
+        for (var readIndex = 0; readIndex < eventsSpan.Length; ++readIndex)
+        {
+            ref var item = ref eventsSpan[readIndex];
+
+            if (item.PredictedTime <= physCurTime
+                && (source == null || source == item.Source))
+            {
+                handler(item.Source, item.Event, item.Session);
+            }
+        }
         storage.Iterating = false;
     }
 
@@ -465,14 +499,14 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
 public struct PredictedEventStorage<T>()
 {
     public bool Iterating = false; // EarlyEvents must not be modified while we iterate over it. Can't process or add items while true.
-    public List<(EntityUid Source, TimeSpan PredictedTime, T Event, EntitySessionEventArgs Args)> EarlyEvents = [];
+    public List<(EntityUid Source, TimeSpan PredictedTime, T Event, ICommonSession? Session)> EarlyEvents = [];
 
-    public void Add(EntityUid source, TimeSpan predictedTime, T ev, EntitySessionEventArgs args)
+    public void Add(EntityUid source, TimeSpan predictedTime, T ev, ICommonSession? session)
     {
         DebugTools.Assert(!Iterating);
         if (Iterating)
             return;
 
-        EarlyEvents.Add((source, predictedTime, ev, args));
+        EarlyEvents.Add((source, predictedTime, ev, session));
     }
 }

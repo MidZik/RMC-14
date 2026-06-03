@@ -58,7 +58,8 @@ public sealed class XenoLungeSystem : EntitySystem
 
         SubscribeLocalEvent<PhysicsUpdateBeforeSolveEvent>(OnBeforeSolve);
 
-        SubscribeAllEvent<XenoLungePredictedHitEvent>(OnPredictedHit);
+        SubscribeNetworkEvent<XenoLungePredictedHitEvent>(OnPredictedHit);
+        SubscribeLocalEvent<XenoActiveLungeComponent, XenoLungePredictedHitEvent>(OnLocalPredictedHit);
 
         SubscribeLocalEvent<XenoLungeComponent, XenoLungeActionEvent>(OnXenoLungeAction);
         SubscribeLocalEvent<XenoLungeComponent, MeleeAttackAttemptEvent>(OnAttackAttempt);
@@ -84,20 +85,25 @@ public sealed class XenoLungeSystem : EntitySystem
         if (args.SenderSession.AttachedEntity is not { } ent)
             return;
 
-        _predictedEventStorage.Add(ent, msg.Time, msg, args);
+        _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
+
+        _predictedEventStorage.Add(ent, msg.Time, msg, args.SenderSession);
     }
 
-    private void HandlePredictedHit(XenoLungePredictedHitEvent msg, EntitySessionEventArgs args)
+    private void OnLocalPredictedHit(Entity<XenoActiveLungeComponent> xeno, ref XenoLungePredictedHitEvent msg)
+    {
+        TryComp<ActorComponent>(xeno, out var actor);
+        _predictedEventStorage.Add(xeno, msg.Time, msg, actor?.PlayerSession);
+    }
+
+    private void HandlePredictedHit(EntityUid xeno, XenoLungePredictedHitEvent msg, ICommonSession? perspectiveSession)
     {
         var offset = msg.Time - _rmcLag.PhysicsCurTime;
 
         if (offset < -_timing.TickPeriod)
             return; // don't handle events that arrived over a tick too late
 
-        if (args.SenderSession.AttachedEntity is not { } ent)
-            return;
-
-        if (!TryComp<XenoActiveLungeComponent>(ent, out var lunging)
+        if (!TryComp<XenoActiveLungeComponent>(xeno, out var lunging)
             || !lunging.Running)
             return;
 
@@ -109,13 +115,11 @@ public sealed class XenoLungeSystem : EntitySystem
 
         if (_net.IsServer)
         {
-            _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
-
-            if (!_rmcLag.Collides(target, ent, args.SenderSession, offset))
+            if (!_rmcLag.Collides(target, xeno, perspectiveSession, offset))
                 return;
         }
 
-        TryLungeHit((ent, lunging), target, true, false);
+        TryLungeHit((xeno, lunging), target, true);
     }
 
     private void OnXenoLungeAction(Entity<XenoLungeComponent> xeno, ref XenoLungeActionEvent args)
@@ -141,7 +145,7 @@ public sealed class XenoLungeSystem : EntitySystem
 
         var origin = _transform.GetMapCoordinates(xeno);
         var targetCoords = _net.IsClient ?
-            _rmcLag.GetCoordinates(target, _timing.CurTime)
+            _rmcLag.GetCoordinates(target, _rmcLag.PhysicsCurTime)
             : _rmcLag.GetCoordinates(target, xeno);
         var diff = targetCoords.Position - origin.Position;
         diff = diff.Normalized() * xeno.Comp.Range;
@@ -207,7 +211,6 @@ public sealed class XenoLungeSystem : EntitySystem
             args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
                 xeno.Owner,
                 _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
-            return;
         }
 
         if (_net.IsServer)
@@ -221,6 +224,16 @@ public sealed class XenoLungeSystem : EntitySystem
                     _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
             }
         }
+
+        if (args.Cancelled && _logPrediction)
+            Log.Debug($"""
+                Prevented lunge collision.
+                  PhysTime: {_rmcLag.PhysicsCurTime.TotalSeconds:F3}
+                  CompTime: {(_rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod).TotalSeconds:F3}
+                  Delay:    {xeno.Comp.ClientTickDelay}
+                  Source:   {xeno}
+                  Target:   {args.OtherEntity}
+                """);
     }
 
     private void OnXenoLungingHit(Entity<XenoActiveLungeComponent> xeno, ref ThrowDoHitEvent args)
@@ -262,12 +275,9 @@ public sealed class XenoLungeSystem : EntitySystem
             }
 
             _rmcLag.SendLastRealTick();
-            RaisePredictiveEvent(predictedEv);
+            RaiseNetworkEvent(predictedEv);
         }
-        else
-        {
-            RaiseLocalEvent(predictedEv);
-        }
+        RaiseLocalEvent(predictedEv);
         _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
     }
 
@@ -280,7 +290,7 @@ public sealed class XenoLungeSystem : EntitySystem
         //StopLunge(ent);
     }
 
-    private bool TryLungeHit(Entity<XenoActiveLungeComponent> xeno, EntityUid target, bool stopThrow, bool predicted = true)
+    private bool TryLungeHit(Entity<XenoActiveLungeComponent> xeno, EntityUid target, bool stopThrow)
     {
         if (!_mobState.IsAlive(xeno)
             || HasComp<StunnedComponent>(xeno)

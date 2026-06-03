@@ -92,7 +92,8 @@ public sealed class XenoLeapSystem : EntitySystem
 
         SubscribeLocalEvent<PhysicsUpdateBeforeSolveEvent>(OnBeforeSolve);
 
-        SubscribeAllEvent<XenoLeapPredictedHitEvent>(OnPredictedHit);
+        SubscribeNetworkEvent<XenoLeapPredictedHitEvent>(OnPredictedHit);
+        SubscribeLocalEvent<XenoLeapingComponent, XenoLeapPredictedHitEvent>(OnLocalPredictedHit);
 
         SubscribeLocalEvent<XenoLeapComponent, XenoLeapActionEvent>(OnXenoLeapAction);
         SubscribeLocalEvent<XenoLeapComponent, XenoLeapDoAfterEvent>(OnXenoLeapDoAfter);
@@ -106,6 +107,7 @@ public sealed class XenoLeapSystem : EntitySystem
         SubscribeLocalEvent<RMCLeapProtectionComponent, MapInitEvent>(OnMapInit);
         SubscribeLocalEvent<RMCLeapProtectionComponent, XenoLeapHitAttempt>(OnXenoLeapHitAttempt);
 
+        SubscribeLocalEvent<XenoLeapingComponent, AttemptMobCollideEvent>(OnXenoLeapingAttemptMobCollide);
         SubscribeLocalEvent<XenoLeapingComponent, PreventCollideEvent>(OnXenoLeapingPreventCollide);
         SubscribeLocalEvent<XenoLeapingComponent, StartCollideEvent>(OnXenoLeapingStartCollide);
         SubscribeLocalEvent<XenoLeapingComponent, ComponentRemove>(OnXenoLeapingRemove);
@@ -126,20 +128,25 @@ public sealed class XenoLeapSystem : EntitySystem
         if (args.SenderSession.AttachedEntity is not { } ent)
             return;
 
-        _predictedEventStorage.Add(ent, msg.Time, msg, args);
+        _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
+
+        _predictedEventStorage.Add(ent, msg.Time, msg, args.SenderSession);
     }
 
-    private void HandlePredictedHit(XenoLeapPredictedHitEvent msg, EntitySessionEventArgs args)
+    private void OnLocalPredictedHit(Entity<XenoLeapingComponent> xeno, ref XenoLeapPredictedHitEvent msg)
+    {
+        TryComp<ActorComponent>(xeno, out var actor);
+        _predictedEventStorage.Add(xeno, msg.Time, msg, actor?.PlayerSession);
+    }
+
+    private void HandlePredictedHit(EntityUid xeno, XenoLeapPredictedHitEvent msg, ICommonSession? perspectiveSession)
     {
         var offset = msg.Time - _rmcLag.PhysicsCurTime;
 
         if (offset < -_timing.TickPeriod)
             return; // don't handle events that arrived over a tick too late
 
-        if (args.SenderSession.AttachedEntity is not { } ent)
-            return;
-
-        if (!TryComp<XenoLeapingComponent>(ent, out var leaping)
+        if (!TryComp<XenoLeapingComponent>(xeno, out var leaping)
             || !leaping.Running)
             return;
 
@@ -148,13 +155,11 @@ public sealed class XenoLeapSystem : EntitySystem
 
         if (_net.IsServer)
         {
-            _rmcLag.SetLastRealTick(args.SenderSession.UserId, msg.LastRealTick);
-
-            if (!_rmcLag.Collides(target, ent, args.SenderSession, offset))
+            if (!_rmcLag.Collides(target, xeno, perspectiveSession, offset))
                 return;
         }
 
-        TryLeapingHit((ent, leaping), target);
+        TryLeapingHit((xeno, leaping), target);
     }
 
     private void OnXenoLeapAction(Entity<XenoLeapComponent> xeno, ref XenoLeapActionEvent args)
@@ -315,10 +320,17 @@ public sealed class XenoLeapSystem : EntitySystem
         args.Range = ent.Comp.LastHitRange;
     }
 
+    private void OnXenoLeapingAttemptMobCollide(Entity<XenoLeapingComponent> xeno, ref AttemptMobCollideEvent args)
+    {
+        //args.Cancelled = true;
+    }
+
     private void OnXenoLeapingPreventCollide(Entity<XenoLeapingComponent> xeno, ref PreventCollideEvent args)
     {
         if (args.Cancelled)
+        {
             return;
+        }
 
         if (!_lagCompQuery.HasComp(args.OtherEntity))
             return; // Only check and prevent collisions with lag comp'd entities
@@ -329,7 +341,6 @@ public sealed class XenoLeapSystem : EntitySystem
             args.Cancelled = !_rmcLag.Collides(args.OtherEntity,
                 xeno.Owner,
                 _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
-            return;
         }
 
         if (_net.IsServer)
@@ -343,17 +354,36 @@ public sealed class XenoLeapSystem : EntitySystem
                     _rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod);
             }
         }
+
+        if (args.Cancelled && _logPrediction)
+            Log.Debug($"""
+                Prevented leap collision.
+                  PhysTime: {_rmcLag.PhysicsCurTime.TotalSeconds:F3}
+                  CompTime: {(_rmcLag.PhysicsCurTime - xeno.Comp.ClientTickDelay * _timing.TickPeriod).TotalSeconds:F3}
+                  Delay:    {xeno.Comp.ClientTickDelay}
+                  Source:   {xeno}
+                  Target:   {args.OtherEntity}
+                """);
     }
 
     private void OnXenoLeapingStartCollide(Entity<XenoLeapingComponent> xeno, ref StartCollideEvent args)
     {
         if (!IsValidLeapHit(xeno, args.OtherEntity))
+        {
             return;
+        }
 
         var predictedEv = new XenoLeapPredictedHitEvent(
             GetNetEntity(args.OtherEntity),
             _rmcLag.GetLastRealTick(null),
             _rmcLag.PhysicsCurTime);
+
+        Log.Debug($"""
+            XenoLeapPredictedHitEvent:
+              Target:      {predictedEv.Target}
+              LagRealTick: {predictedEv.LastRealTick}
+              PhysCurTime: {predictedEv.Time.TotalSeconds:F3}
+            """);
 
         if (_net.IsClient && _timing.IsFirstTimePredicted)
         {
@@ -375,12 +405,9 @@ public sealed class XenoLeapSystem : EntitySystem
             }
 
             _rmcLag.SendLastRealTick();
-            RaisePredictiveEvent(predictedEv);
+            RaiseNetworkEvent(predictedEv);
         }
-        else
-        {
-            RaiseLocalEvent(predictedEv);
-        }
+        RaiseLocalEvent(xeno, predictedEv);
         _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
     }
 
@@ -616,6 +643,8 @@ public sealed class XenoLeapSystem : EntitySystem
 
     private bool TryLeapingHit(Entity<XenoLeapingComponent> xeno, EntityUid target)
     {
+        Log.Debug("TryLeapingHit");
+
         if (!IsValidLeapHit(xeno, target))
             return false;
 
