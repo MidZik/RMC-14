@@ -1,4 +1,4 @@
-﻿using Robust.Shared.GameStates;
+using Robust.Shared.GameStates;
 using Robust.Shared.Network;
 using Robust.Shared.Player;
 
@@ -15,4 +15,6 @@ public sealed partial class XenoProjectileShotComponent : Component
 
     [DataField, AutoNetworkedField]
     public EntityUid? ShooterEnt;
+
+    public TimeSpan ShotAtTime;
 }

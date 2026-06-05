@@ -391,12 +391,12 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
 
     /// <summary>
     /// Passes every stored event that is predicted to occur now or in the past
-    /// into a handler for handling, and then removes it from the list.
-    /// `handler` MUST NOT modify storage in any way. (Do not add events to the
-    /// storage inside the handler.)
+    /// into a handler for handling, and then removes it from the list if the handler
+    /// return true.  `handler` MUST NOT modify storage in any way.
+    /// (Do not add events to the storage inside the handler.)
     /// </summary>
     public void ProcessEvents<T>(PredictedEventStorage<T> storage,
-        Action<EntityUid, T, ICommonSession?> handler,
+        PredictedEventHandler<T> handler,
         EntityUid? source = null)
     {
         if (storage.Iterating)
@@ -419,8 +419,8 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
             if (item.PredictedTime <= physCurTime
                 && (source == null || source == item.Source))
             {
-                handler(item.Source, item.Event, item.Session);
-                continue;
+                if (handler(ref item))
+                    continue; // only delete if handled
             }
 
             if (writeIndex != readIndex)
@@ -430,40 +430,6 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
         }
         // finally done iterating and moving items, remove excess items from the list
         storage.EarlyEvents.RemoveRange(writeIndex, eventsSpan.Length - writeIndex);
-        storage.Iterating = false;
-    }
-
-    /// <summary>
-    /// Passes every stored event that is predicted to occur now or in the past
-    /// into a handler for handling. Does NOT remove events from the list.
-    /// `handler` MUST NOT modify storage in any way. (Do not add events to the
-    /// storage inside the handler.)
-    /// </summary>
-    public void ProcessEventsWithoutRemoval<T>(PredictedEventStorage<T> storage,
-        Action<EntityUid, T, ICommonSession?> handler,
-        EntityUid? source = null)
-    {
-        if (storage.Iterating)
-        {
-            Log.Error("Tried processing event messages while they are already being processed.");
-            DebugTools.Assert(!storage.Iterating);
-            return;
-        }
-        storage.Iterating = true;
-
-        var physCurTime = PhysicsCurTime;
-        var eventsSpan = CollectionsMarshal.AsSpan(storage.EarlyEvents);
-
-        for (var readIndex = 0; readIndex < eventsSpan.Length; ++readIndex)
-        {
-            ref var item = ref eventsSpan[readIndex];
-
-            if (item.PredictedTime <= physCurTime
-                && (source == null || source == item.Source))
-            {
-                handler(item.Source, item.Event, item.Session);
-            }
-        }
         storage.Iterating = false;
     }
 
@@ -496,17 +462,39 @@ public abstract class SharedRMCLagCompensationSystem : EntitySystem
     }
 }
 
+public delegate bool PredictedEventHandler<T>(ref PredictedEvent<T> @event);
+
+public struct PredictedEvent<T>
+{
+    public readonly EntityUid Source;
+    public TimeSpan PredictedTime;
+    public readonly T Event;
+    public readonly ICommonSession? Session;
+
+    public PredictedEvent(
+        EntityUid source,
+        TimeSpan predictedTime,
+        T @event,
+        ICommonSession? session)
+    {
+        Source = source;
+        PredictedTime = predictedTime;
+        Event = @event;
+        Session = session;
+    }
+}
+
 public struct PredictedEventStorage<T>()
 {
     public bool Iterating = false; // EarlyEvents must not be modified while we iterate over it. Can't process or add items while true.
-    public List<(EntityUid Source, TimeSpan PredictedTime, T Event, ICommonSession? Session)> EarlyEvents = [];
+    public List<PredictedEvent<T>> EarlyEvents = [];
 
-    public void Add(EntityUid source, TimeSpan predictedTime, T ev, ICommonSession? session)
+    public void Add(EntityUid source, TimeSpan predictedTime, T @event, ICommonSession? session)
     {
         DebugTools.Assert(!Iterating);
         if (Iterating)
             return;
 
-        EarlyEvents.Add((source, predictedTime, ev, session));
+        EarlyEvents.Add(new(source, predictedTime, @event, session));
     }
 }

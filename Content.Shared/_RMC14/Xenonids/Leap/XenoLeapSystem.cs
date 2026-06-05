@@ -12,6 +12,7 @@ using Content.Shared._RMC14.Stun;
 using Content.Shared._RMC14.Weapons.Melee;
 using Content.Shared._RMC14.Xenonids.Hive;
 using Content.Shared._RMC14.Xenonids.Invisibility;
+using Content.Shared._RMC14.Xenonids.Lunge;
 using Content.Shared._RMC14.Xenonids.Parasite;
 using Content.Shared._RMC14.Xenonids.Plasma;
 using Content.Shared.ActionBlocker;
@@ -139,27 +140,32 @@ public sealed class XenoLeapSystem : EntitySystem
         _predictedEventStorage.Add(xeno, msg.Time, msg, actor?.PlayerSession);
     }
 
-    private void HandlePredictedHit(EntityUid xeno, XenoLeapPredictedHitEvent msg, ICommonSession? perspectiveSession)
+    private bool HandlePredictedHit(ref PredictedEvent<XenoLeapPredictedHitEvent> @event)
     {
+        var xeno = @event.Source;
+        var msg = @event.Event;
+        var perspectiveSession = @event.Session;
+
         var offset = msg.Time - _rmcLag.PhysicsCurTime;
 
         if (offset < -_timing.TickPeriod)
-            return; // don't handle events that arrived over a tick too late
+            return true; // don't handle events that arrived over a tick too late
 
         if (!TryComp<XenoLeapingComponent>(xeno, out var leaping)
             || !leaping.Running)
-            return;
+            return false; // might start leaping later
 
         if (GetEntity(msg.Target) is not { Valid: true } target)
-            return;
+            return true; // target should always be valid
 
         if (_net.IsServer)
         {
             if (!_rmcLag.Collides(target, xeno, perspectiveSession, offset))
-                return;
+                return true;
         }
 
         TryLeapingHit((xeno, leaping), target);
+        return true;
     }
 
     private void OnXenoLeapAction(Entity<XenoLeapComponent> xeno, ref XenoLeapActionEvent args)

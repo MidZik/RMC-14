@@ -6,6 +6,7 @@ using Content.Shared._RMC14.Pulling;
 using Content.Shared._RMC14.Stun;
 using Content.Shared._RMC14.Weapons.Melee;
 using Content.Shared._RMC14.Xenonids.Leap;
+using Content.Shared._RMC14.Xenonids.Projectile;
 using Content.Shared.Mobs.Systems;
 using Content.Shared.Movement.Pulling.Events;
 using Content.Shared.Movement.Pulling.Systems;
@@ -96,30 +97,36 @@ public sealed class XenoLungeSystem : EntitySystem
         _predictedEventStorage.Add(xeno, msg.Time, msg, actor?.PlayerSession);
     }
 
-    private void HandlePredictedHit(EntityUid xeno, XenoLungePredictedHitEvent msg, ICommonSession? perspectiveSession)
+    private bool HandlePredictedHit(ref PredictedEvent<XenoLungePredictedHitEvent> @event)
     {
+        var xeno = @event.Source;
+        var msg = @event.Event;
+        var perspectiveSession = @event.Session;
+
         var offset = msg.Time - _rmcLag.PhysicsCurTime;
 
         if (offset < -_timing.TickPeriod)
-            return; // don't handle events that arrived over a tick too late
+            return true; // discard events that are too delayed
 
         if (!TryComp<XenoActiveLungeComponent>(xeno, out var lunging)
             || !lunging.Running)
-            return;
+            return false; // might not have started lunging yet
 
         if (GetEntity(msg.Target) is not { Valid: true } target)
-            return;
+            return true;
 
         if (lunging.Target != target)
-            return;
+            return true;
 
         if (_net.IsServer)
         {
             if (!_rmcLag.Collides(target, xeno, perspectiveSession, offset))
-                return;
+                return true;
         }
 
         TryLungeHit((xeno, lunging), target, true);
+
+        return true;
     }
 
     private void OnXenoLungeAction(Entity<XenoLungeComponent> xeno, ref XenoLungeActionEvent args)
@@ -277,7 +284,7 @@ public sealed class XenoLungeSystem : EntitySystem
             _rmcLag.SendLastRealTick();
             RaiseNetworkEvent(predictedEv);
         }
-        RaiseLocalEvent(predictedEv);
+        RaiseLocalEvent(xeno, predictedEv);
         _rmcLag.ProcessEvents(_predictedEventStorage, HandlePredictedHit, xeno);
     }
 
