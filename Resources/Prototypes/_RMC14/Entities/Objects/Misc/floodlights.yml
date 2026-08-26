@@ -343,17 +343,25 @@
   id: RMCStreetlight
   name: colony streetlight
   components:
+  - type: MobCollision
+  - type: RMCMobCollisionMass
+    mass: 1000
+  - type: RMCMobCollision
+    fixtureShape:
+      !type:PhysShapeCircle
+      radius: 0.1
   - type: Fixtures
     fixtures:
       fix1:
         shape:
           !type:PhysShapeAabb
-          bounds: "-0.1,-0.1,0.1,0.1"
+          bounds: "-0.15,-0.15,0.15,0.15"
         density: 50
         mask:
         - MachineMask
         layer:
-        - MachineLayer
+        - Opaque
+        - Vehicle
   - type: Sprite
     noRot: true
     sprite: _RMC14/Objects/Misc/Lights/streetlight.rsi
@@ -383,17 +391,25 @@
   - type: Construction
     graph: RMCStreetlightBroken
     node: start
+  - type: MobCollision
+  - type: RMCMobCollisionMass
+    mass: 1000
+  - type: RMCMobCollision
+    fixtureShape:
+      !type:PhysShapeCircle
+      radius: 0.1
   - type: Fixtures
     fixtures:
       fix1:
         shape:
           !type:PhysShapeAabb
-          bounds: "-0.1,-0.1,0.1,0.1"
+          bounds: "-0.15,-0.15,0.15,0.15"
         density: 50
         mask:
         - MachineMask
         layer:
-        - MachineLayer
+        - Opaque
+        - Vehicle
 
 # Traffic light
 
@@ -423,6 +439,13 @@
         visible: false
         map: [ "light" ]
     drawdepth: Mobs
+  - type: MobCollision
+  - type: RMCMobCollisionMass
+    mass: 1000
+  - type: RMCMobCollision
+    fixtureShape:
+      !type:PhysShapeCircle
+      radius: 0.1
   - type: Fixtures
     fixtures:
       fix1:
@@ -433,7 +456,8 @@
         mask:
         - MachineMask
         layer:
-        - MachineLayer
+        - Opaque
+        - Vehicle
   - type: Construction
     graph: RMCFloodlightBroken
     node: completed
