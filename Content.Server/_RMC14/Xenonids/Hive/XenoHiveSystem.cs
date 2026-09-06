@@ -107,10 +107,7 @@ public sealed class XenoHiveSystem : SharedXenoHiveSystem
                 continue;
 
             hive.LateJoinMarines -= lateJoinsPer;
-            if (hive.BurrowedLarvaDebt > 0)
-                ChangeBurrowedLarvaDebt((uid, hive), -1);
-            else
-                ChangeBurrowedLarva((uid, hive), 1);
+            ChangeBurrowedLarva((uid, hive), 1);
         }
     }
 
